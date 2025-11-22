@@ -49,8 +49,47 @@ CREATE TABLE IF NOT EXISTS compras (
 )
 """)
 
+# ===== NOVA TABELA: PUNIÇÕES =====
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS punicoes (
+    usuario TEXT PRIMARY KEY,
+    ate TEXT
+)
+""")
+
 conn.commit()
 conn.close()
+
+
+# ======== FUNÇÕES DE PUNIÇÃO ========
+def usuario_punido(usuario):
+    conn = sqlite3.connect("biblioteca.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT ate FROM punicoes WHERE usuario = ?", (usuario,))
+    resultado = cursor.fetchone()
+    conn.close()
+
+    if not resultado:
+        return False
+
+    data_fim = datetime.strptime(resultado[0], "%d/%m/%Y")
+    hoje = datetime.now()
+
+    return hoje <= data_fim
+
+
+def punir_usuario(usuario, dias=3):
+    data_punicao = (datetime.now() + timedelta(days=dias)).strftime("%d/%m/%Y")
+
+    conn = sqlite3.connect("biblioteca.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO punicoes (usuario, ate)
+        VALUES (?, ?)
+        ON CONFLICT(usuario) DO UPDATE SET ate = ?
+    """, (usuario, data_punicao, data_punicao))
+    conn.commit()
+    conn.close()
 
 
 # ======== LOGIN ========
@@ -152,6 +191,32 @@ def abrir_tela_comprar_emprestar():
         conn = sqlite3.connect("biblioteca.db")
         cursor = conn.cursor()
 
+        # ======== VERIFICAR PUNIÇÃO ========
+        if opcao == "Empréstimo":
+            if usuario_punido(usuario):
+                conn.close()
+                messagebox.showerror("Punição ativa", f"{usuario} está punido e não pode emprestar livros.")
+                return
+
+            # Verificar atrasos existentes
+            cursor.execute("""
+                SELECT data_devolucao FROM emprestimos
+                WHERE usuario = ? AND status = 'Emprestado'
+            """, (usuario,))
+            emprestimos_user = cursor.fetchall()
+
+            hoje = datetime.now()
+
+            for emp in emprestimos_user:
+                data_dev = datetime.strptime(emp[0], "%d/%m/%Y")
+                if hoje > data_dev:
+                    punir_usuario(usuario, dias=3)
+                    conn.close()
+                    messagebox.showerror("Atraso detectado",
+                                         f"{usuario} tinha um livro atrasado e foi punido por 3 dias.")
+                    return
+
+        # ======== COMPRA ========
         if opcao == "Compra":
             data_compra = datetime.now().strftime("%d/%m/%Y %H:%M")
             cursor.execute("INSERT INTO compras (usuario, livro, data_compra) VALUES (?, ?, ?)",
@@ -159,6 +224,7 @@ def abrir_tela_comprar_emprestar():
             conn.commit()
             messagebox.showinfo("Compra", f"Livro '{livro}' foi comprado e registrado.")
 
+        # ======== EMPRÉSTIMO ========
         elif opcao == "Empréstimo":
             data_emprestimo = datetime.now().strftime("%d/%m/%Y")
             data_devolucao = (datetime.now() + timedelta(days=7)).strftime("%d/%m/%Y")
@@ -169,6 +235,7 @@ def abrir_tela_comprar_emprestar():
             conn.commit()
             messagebox.showinfo("Empréstimo", f"Livro '{livro}' emprestado a {usuario} até {data_devolucao}.")
 
+        # ======== DEVOLUÇÃO ========
         elif opcao == "Devolução":
             cursor.execute("SELECT * FROM emprestimos WHERE usuario = ? AND livro = ? AND status = 'Emprestado'",
                            (usuario, livro))
@@ -195,6 +262,15 @@ def abrir_perfil_usuario(usuario):
 
     tk.Label(perfil, text=f"Perfil de {usuario}", font=("Arial", 14, "bold"), bg="#2E2E2E", fg="white").pack(pady=10)
 
+    # VERIFICAR PUNIÇÃO
+    conn = sqlite3.connect("biblioteca.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT ate FROM punicoes WHERE usuario = ?", (usuario,))
+    pun = cursor.fetchone()
+    if pun:
+        tk.Label(perfil, text=f"⚠ Punido até {pun[0]}", fg="red", bg="#2E2E2E",
+                 font=("Arial", 11, "bold")).pack(pady=5)
+
     img_label = tk.Label(perfil, text="(sem foto)", bg="#2E2E2E", fg="white", width=20, height=6)
     img_label.pack(pady=5)
 
@@ -208,8 +284,6 @@ def abrir_perfil_usuario(usuario):
                 img_label.image = img
         tk.Button(perfil, text="Selecionar Foto", command=selecionar_foto, bg="blue", fg="white").pack(pady=5)
 
-    conn = sqlite3.connect("biblioteca.db")
-    cursor = conn.cursor()
     cursor.execute("SELECT livro, data_emprestimo, data_devolucao, status FROM emprestimos WHERE usuario = ?", (usuario,))
     emprestimos = cursor.fetchall()
     cursor.execute("SELECT livro, data_compra FROM compras WHERE usuario = ?", (usuario,))
@@ -258,7 +332,7 @@ def abrir_tela_principal(usuario):
 
     carregar_livros()
 
-    # ======== NOVO: Mostrar descrição ao clicar ========
+    # ======== MOSTRAR DESCRIÇÃO AUTOMÁTICA ========
     def mostrar_descricao_evento(event):
         selecionado = lista.curselection()
         if not selecionado:
@@ -275,7 +349,6 @@ def abrir_tela_principal(usuario):
             messagebox.showinfo(f"Descrição - {livro}", resultado[0])
 
     lista.bind("<<ListboxSelect>>", mostrar_descricao_evento)
-    # =====================================================
 
     def adicionar_livro():
         novo_livro = simpledialog.askstring("Adicionar Livro", "Digite o nome do livro:")
