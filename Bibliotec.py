@@ -21,13 +21,24 @@ CREATE TABLE IF NOT EXISTS usuarios (
 )
 """)
 
+# Criar tabela livros com coluna quantidade (se já existir sem a coluna, vamos adicionar abaixo)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS livros (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     titulo TEXT UNIQUE,
-    descricao TEXT
+    descricao TEXT,
+    quantidade INTEGER DEFAULT 1
 )
 """)
+
+# Se a tabela existia sem a coluna 'quantidade', adiciona-a:
+cursor.execute("PRAGMA table_info(livros)")
+cols = [c[1] for c in cursor.fetchall()]
+if "quantidade" not in cols:
+    try:
+        cursor.execute("ALTER TABLE livros ADD COLUMN quantidade INTEGER DEFAULT 1")
+    except Exception:
+        pass  # se falhar por algum motivo, não quebamos o app
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS emprestimos (
@@ -139,7 +150,7 @@ def limpar_campos():
 def abrir_tela_comprar_emprestar():
     tela = tk.Toplevel()
     tela.title("Gerenciar Livros")
-    tela.geometry("500x440")
+    tela.geometry("520x480")
     tela.config(bg="#2E2E2E")
 
     tk.Label(tela, text="Gerenciar Livros", font=("Arial", 16, "bold"), bg="#2E2E2E", fg="white").pack(pady=10)
@@ -147,7 +158,7 @@ def abrir_tela_comprar_emprestar():
     frame = tk.Frame(tela, bg="#2E2E2E")
     frame.pack(pady=10)
 
-    lista = tk.Listbox(frame, width=60, height=10)
+    lista = tk.Listbox(frame, width=70, height=12)
     lista.pack(side=tk.LEFT, padx=5)
 
     scroll = tk.Scrollbar(frame, command=lista.yview)
@@ -158,9 +169,15 @@ def abrir_tela_comprar_emprestar():
         lista.delete(0, tk.END)
         conn = sqlite3.connect("biblioteca.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT titulo FROM livros ORDER BY titulo")
+        # Carrega todos os livros (incluindo os com quantidade 0 para gerenciamento interno),
+        # mas marca os esgotados.
+        cursor.execute("SELECT titulo, quantidade FROM livros ORDER BY titulo")
         for row in cursor.fetchall():
-            lista.insert(tk.END, row[0])
+            titulo, qt = row
+            if qt and qt > 0:
+                lista.insert(tk.END, f"{titulo} ({qt} disponíveis)")
+            else:
+                lista.insert(tk.END, f"{titulo} (esgotado)")
         conn.close()
 
     carregar_livros()
@@ -169,7 +186,7 @@ def abrir_tela_comprar_emprestar():
 
     opcao_var = tk.StringVar(value="Compra")
     for texto in ["Compra", "Empréstimo", "Devolução"]:
-        tk.Radiobutton(tela, text=texto, variable=opcao_var, value=texto, bg="#2E2E2E", fg="white").pack()
+        tk.Radiobutton(tela, text=texto, variable=opcao_var, value=texto, bg="#2E2E2E", fg="white").pack(anchor="w")
 
     tk.Label(tela, text="Usuário:", bg="#2E2E2E", fg="white").pack(pady=3)
     entrada_usuario_local = tk.Entry(tela, width=30)
@@ -186,7 +203,9 @@ def abrir_tela_comprar_emprestar():
             messagebox.showwarning("Aviso", "Digite o nome do usuário.")
             return
 
-        livro = lista.get(selecionado)
+        item_text = lista.get(selecionado)
+        # remover a parte " (x disponíveis)" ou " (esgotado)" para obter título real
+        livro = item_text.split(" (")[0]
         opcao = opcao_var.get()
         conn = sqlite3.connect("biblioteca.db")
         cursor = conn.cursor()
@@ -216,24 +235,47 @@ def abrir_tela_comprar_emprestar():
                                          f"{usuario} tinha um livro atrasado e foi punido por 3 dias.")
                     return
 
+        # ======== Verificar quantidade atual do livro ========
+        cursor.execute("SELECT quantidade FROM livros WHERE titulo = ?", (livro,))
+        resultado_qt = cursor.fetchone()
+        if not resultado_qt:
+            conn.close()
+            messagebox.showerror("Erro", "Livro não encontrado no banco.")
+            return
+        quantidade_atual = resultado_qt[0] or 0
+
         # ======== COMPRA ========
         if opcao == "Compra":
+            if quantidade_atual <= 0:
+                # mesmo que esgotado, podemos registrar a compra (ou bloquear) — aqui bloqueamos:
+                conn.close()
+                messagebox.showwarning("Indisponível", f"O livro '{livro}' está esgotado e não pode ser comprado.")
+                return
+            # registrar compra e diminuir estoque
             data_compra = datetime.now().strftime("%d/%m/%Y %H:%M")
             cursor.execute("INSERT INTO compras (usuario, livro, data_compra) VALUES (?, ?, ?)",
                            (usuario, livro, data_compra))
+            cursor.execute("UPDATE livros SET quantidade = quantidade - 1 WHERE titulo = ?", (livro,))
             conn.commit()
-            messagebox.showinfo("Compra", f"Livro '{livro}' foi comprado e registrado.")
+            messagebox.showinfo("Compra", f"Livro '{livro}' foi comprado e estoque atualizado.")
+            carregar_livros()
 
         # ======== EMPRÉSTIMO ========
         elif opcao == "Empréstimo":
+            if quantidade_atual <= 0:
+                conn.close()
+                messagebox.showwarning("Indisponível", f"O livro '{livro}' está esgotado e não pode ser emprestado.")
+                return
             data_emprestimo = datetime.now().strftime("%d/%m/%Y")
             data_devolucao = (datetime.now() + timedelta(days=7)).strftime("%d/%m/%Y")
             cursor.execute("""
                 INSERT INTO emprestimos (usuario, livro, data_emprestimo, data_devolucao, status)
                 VALUES (?, ?, ?, ?, ?)
             """, (usuario, livro, data_emprestimo, data_devolucao, "Emprestado"))
+            cursor.execute("UPDATE livros SET quantidade = quantidade - 1 WHERE titulo = ?", (livro,))
             conn.commit()
             messagebox.showinfo("Empréstimo", f"Livro '{livro}' emprestado a {usuario} até {data_devolucao}.")
+            carregar_livros()
 
         # ======== DEVOLUÇÃO ========
         elif opcao == "Devolução":
@@ -242,8 +284,10 @@ def abrir_tela_comprar_emprestar():
             emprestimo = cursor.fetchone()
             if emprestimo:
                 cursor.execute("UPDATE emprestimos SET status = 'Devolvido' WHERE id = ?", (emprestimo[0],))
+                cursor.execute("UPDATE livros SET quantidade = quantidade + 1 WHERE titulo = ?", (livro,))
                 conn.commit()
-                messagebox.showinfo("Devolução", f"Livro '{livro}' devolvido com sucesso!")
+                messagebox.showinfo("Devolução", f"Livro '{livro}' devolvido com sucesso! Estoque atualizado.")
+                carregar_livros()
             else:
                 messagebox.showwarning("Aviso", "Nenhum empréstimo ativo encontrado para este livro.")
 
@@ -257,7 +301,7 @@ def abrir_tela_comprar_emprestar():
 def abrir_perfil_usuario(usuario):
     perfil = tk.Toplevel()
     perfil.title("Perfil do Usuário")
-    perfil.geometry("400x420")
+    perfil.geometry("420x460")
     perfil.config(bg="#2E2E2E")
 
     tk.Label(perfil, text=f"Perfil de {usuario}", font=("Arial", 14, "bold"), bg="#2E2E2E", fg="white").pack(pady=10)
@@ -312,27 +356,29 @@ def abrir_tela_principal(usuario):
     tela_login.withdraw()
     tela_principal = tk.Toplevel()
     tela_principal.title("Biblioteca - Catálogo de Livros")
-    tela_principal.geometry("450x460")
+    tela_principal.geometry("470x480")
     tela_principal.config(bg="#2E2E2E")
 
     tk.Label(tela_principal, text=f"Bem-vindo, {usuario}!", font=("Arial", 14), bg="#2E2E2E", fg="white").pack(pady=10)
     tk.Label(tela_principal, text="📚 Catálogo de Livros", font=("Arial", 12, "bold"), bg="#2E2E2E", fg="lightblue").pack(pady=5)
 
-    lista = tk.Listbox(tela_principal, width=55, height=10)
+    lista = tk.Listbox(tela_principal, width=60, height=12)
     lista.pack(pady=10)
 
     def carregar_livros():
         lista.delete(0, tk.END)
         conn = sqlite3.connect("biblioteca.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT titulo FROM livros ORDER BY titulo")
+        # Mostrar apenas livros com quantidade > 0 no catálogo principal (opção B: mais leve)
+        cursor.execute("SELECT titulo, quantidade FROM livros WHERE quantidade > 0 ORDER BY titulo")
         for row in cursor.fetchall():
-            lista.insert(tk.END, row[0])
+            titulo, qt = row
+            lista.insert(tk.END, titulo)  # só o título na lista principal
         conn.close()
 
     carregar_livros()
 
-    # ======== MOSTRAR DESCRIÇÃO AUTOMÁTICA ========
+    # ======== MOSTRAR DESCRIÇÃO + QUANTIDADE AO CLICAR ========
     def mostrar_descricao_evento(event):
         selecionado = lista.curselection()
         if not selecionado:
@@ -341,28 +387,42 @@ def abrir_tela_principal(usuario):
 
         conn = sqlite3.connect("biblioteca.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT descricao FROM livros WHERE titulo = ?", (livro,))
+        cursor.execute("SELECT descricao, quantidade FROM livros WHERE titulo = ?", (livro,))
         resultado = cursor.fetchone()
         conn.close()
 
-        if resultado and resultado[0]:
-            messagebox.showinfo(f"Descrição - {livro}", resultado[0])
+        descricao = resultado[0] if (resultado and resultado[0]) else "(sem descrição)"
+        quantidade = resultado[1] if resultado else 0
+
+        messagebox.showinfo(f"{livro} — Disponibilidade", f"Descrição: {descricao}\n\nQuantidade disponível: {quantidade}")
 
     lista.bind("<<ListboxSelect>>", mostrar_descricao_evento)
 
     def adicionar_livro():
         novo_livro = simpledialog.askstring("Adicionar Livro", "Digite o nome do livro:")
-        if novo_livro:
-            conn = sqlite3.connect("biblioteca.db")
-            cursor = conn.cursor()
-            try:
-                cursor.execute("INSERT INTO livros (titulo) VALUES (?)", (novo_livro,))
-                conn.commit()
-                messagebox.showinfo("Sucesso", f"Livro '{novo_livro}' adicionado com sucesso!")
-            except sqlite3.IntegrityError:
-                messagebox.showwarning("Aviso", "Esse livro já existe no catálogo.")
-            conn.close()
-            carregar_livros()
+        if not novo_livro:
+            return
+        quantidade = simpledialog.askinteger("Quantidade", "Quantidade inicial (inteiro >=1):", minvalue=1, initialvalue=1)
+        if not quantidade:
+            quantidade = 1
+        conn = sqlite3.connect("biblioteca.db")
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO livros (titulo, quantidade) VALUES (?, ?)", (novo_livro, quantidade))
+            conn.commit()
+            messagebox.showinfo("Sucesso", f"Livro '{novo_livro}' adicionado com sucesso ({quantidade} unidades).")
+        except sqlite3.IntegrityError:
+            # livro já existe, perguntar se deseja aumentar o estoque
+            cursor.execute("SELECT quantidade FROM livros WHERE titulo = ?", (novo_livro,))
+            atual = cursor.fetchone()
+            if atual:
+                atual_qt = atual[0] or 0
+                if messagebox.askyesno("Livro existe", f"'{novo_livro}' já existe com {atual_qt} unidades.\nDeseja adicionar mais {quantidade}?"):
+                    cursor.execute("UPDATE livros SET quantidade = quantidade + ? WHERE titulo = ?", (quantidade, novo_livro))
+                    conn.commit()
+                    messagebox.showinfo("Sucesso", f"Estoque atualizado: {novo_livro} agora tem {atual_qt + quantidade} unidades.")
+        conn.close()
+        carregar_livros()
 
     def remover_livro():
         selecionado = lista.curselection()
@@ -370,14 +430,14 @@ def abrir_tela_principal(usuario):
             messagebox.showwarning("Aviso", "Selecione um livro para remover.")
             return
         livro = lista.get(selecionado)
-        if messagebox.askyesno("Confirmar", f"Remover '{livro}'?"):
+        if messagebox.askyesno("Confirmar", f"Remover '{livro}' (apaga registro)?"):
             conn = sqlite3.connect("biblioteca.db")
             cursor = conn.cursor()
             cursor.execute("DELETE FROM livros WHERE titulo = ?", (livro,))
             conn.commit()
             conn.close()
             carregar_livros()
-            messagebox.showinfo("Removido", f"Livro '{livro}' foi removido.")
+            messagebox.showinfo("Removido", f"Livro '{livro}' foi removido do sistema.")
 
     def descricao_livro():
         selecionado = lista.curselection()
@@ -387,17 +447,18 @@ def abrir_tela_principal(usuario):
         livro = lista.get(selecionado)
         conn = sqlite3.connect("biblioteca.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT descricao FROM livros WHERE titulo = ?", (livro,))
+        cursor.execute("SELECT descricao, quantidade FROM livros WHERE titulo = ?", (livro,))
         resultado = cursor.fetchone()
         if resultado and resultado[0]:
-            messagebox.showinfo(f"Descrição - {livro}", resultado[0])
+            messagebox.showinfo(f"Descrição - {livro}", f"{resultado[0]}\n\nQuantidade disponível: {resultado[1]}")
         else:
             nova_desc = simpledialog.askstring("Adicionar Descrição", f"Adicione uma descrição para '{livro}':")
-            if nova_desc:
+            if nova_desc is not None:
                 cursor.execute("UPDATE livros SET descricao = ? WHERE titulo = ?", (nova_desc, livro))
                 conn.commit()
                 messagebox.showinfo("Sucesso", "Descrição adicionada com sucesso!")
         conn.close()
+        carregar_livros()
 
     frame_botoes = tk.Frame(tela_principal, bg="#2E2E2E")
     frame_botoes.pack(pady=5)
