@@ -195,7 +195,6 @@ def abrir_perfil_usuario(usuario):
 
     tk.Label(perfil, text=f"Perfil de {usuario}", font=("Arial", 14, "bold"), bg="#2E2E2E", fg="white").pack(pady=10)
 
-    # Se quiser mostrar foto (opcional)
     img_label = tk.Label(perfil, text="(sem foto)", bg="#2E2E2E", fg="white", width=20, height=6)
     img_label.pack(pady=5)
 
@@ -209,7 +208,6 @@ def abrir_perfil_usuario(usuario):
                 img_label.image = img
         tk.Button(perfil, text="Selecionar Foto", command=selecionar_foto, bg="blue", fg="white").pack(pady=5)
 
-    # Mostrar histórico do usuário
     conn = sqlite3.connect("biblioteca.db")
     cursor = conn.cursor()
     cursor.execute("SELECT livro, data_emprestimo, data_devolucao, status FROM emprestimos WHERE usuario = ?", (usuario,))
@@ -259,6 +257,25 @@ def abrir_tela_principal(usuario):
         conn.close()
 
     carregar_livros()
+
+    # ======== NOVO: Mostrar descrição ao clicar ========
+    def mostrar_descricao_evento(event):
+        selecionado = lista.curselection()
+        if not selecionado:
+            return
+        livro = lista.get(selecionado)
+
+        conn = sqlite3.connect("biblioteca.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT descricao FROM livros WHERE titulo = ?", (livro,))
+        resultado = cursor.fetchone()
+        conn.close()
+
+        if resultado and resultado[0]:
+            messagebox.showinfo(f"Descrição - {livro}", resultado[0])
+
+    lista.bind("<<ListboxSelect>>", mostrar_descricao_evento)
+    # =====================================================
 
     def adicionar_livro():
         novo_livro = simpledialog.askstring("Adicionar Livro", "Digite o nome do livro:")
@@ -318,7 +335,6 @@ def abrir_tela_principal(usuario):
 
     tk.Button(tela_principal, text="Gerenciar Livros", command=abrir_tela_comprar_emprestar, bg="lightblue", fg="white", width=20).pack(pady=10)
 
-    # --- PERFIL ---
     tk.Button(tela_principal, text="Perfil", command=lambda: abrir_perfil_usuario(usuario), bg="purple", fg="white", width=12).pack(pady=5)
 
     tk.Button(tela_principal, text="Sair", command=lambda: [tela_principal.destroy(), tela_login.deiconify()], bg="tomato", fg="white", width=10).pack(pady=10)
